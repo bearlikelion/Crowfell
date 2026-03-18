@@ -797,6 +797,81 @@ static int install_reftype_patch(void) {
     return 1;
 }
 
+/* ── Hook 3: Skip addon scene loading in ZoneManager.ClientLoadScene ──── */
+/*
+ * Inside <ClientLoadScene>d__50.MoveNext coroutine.
+ *
+ * The coroutine loads the main zone scene (works), then tries to load
+ * addon scenes via StreamingZone.ClientAddonSceneName.  These addon
+ * scenes were CDN-streamed in production and don't exist locally,
+ * causing a Unity native crash in SceneManager.LoadSceneAsync.
+ *
+ * Two patches work together:
+ *
+ * Patch 3a — NOP the LoadSceneAsync call (RVA 0x32FDFF4, 5 bytes)
+ *   Original: E8 F7 85 87 FE  (call SceneManager.LoadSceneAsync)
+ *   Patched:  33 C0 90 90 90  (xor eax, eax; nop; nop; nop)
+ *   Effect:   rax = 0 (null AsyncOperation)
+ *
+ * Patch 3b — Redirect the null-AsyncOperation error JE (RVA 0x32FE018, 6 bytes)
+ *   After the call, the code checks if the AsyncOperation is null.
+ *   Original JE goes to an error handler that throws.
+ *   We redirect it to the success cleanup code instead.
+ *
+ *   Original: 0F 84 37 02 00 00  (JE +0x237 → error handler @ 0x32FD255)
+ *   Patched:  E9 03 02 00 00 90  (JMP +0x203 → ZoneLoaded=true @ 0x32FD220)
+ *
+ * The JMP target (RVA 0x32FE220) sets ZoneLoaded=true, calls the
+ * callback with success=true, and returns false (coroutine done).
+ * ClientAddonsLoaded was already set to true earlier in the coroutine
+ * (at RVA 0x32FDEF3), before the LoadSceneAsync call.
+ */
+
+#define RVA_ADDON_CALL   0x032FDFF4  /* call LoadSceneAsync */
+#define RVA_ADDON_NULLJE 0x032FE018  /* je after null check on AsyncOperation */
+
+static int install_addon_skip_patch(void) {
+    uint8_t *call_addr = ga_base + RVA_ADDON_CALL;
+    uint8_t *je_addr   = ga_base + RVA_ADDON_NULLJE;
+
+    /* Verify call instruction: E8 F7 85 87 FE */
+    if (call_addr[0] != 0xE8 || call_addr[1] != 0xF7 ||
+        call_addr[2] != 0x85 || call_addr[3] != 0x87 || call_addr[4] != 0xFE) {
+        logmsg("ERROR: Unexpected bytes at addon call site: %02X %02X %02X %02X %02X",
+               call_addr[0], call_addr[1], call_addr[2], call_addr[3], call_addr[4]);
+        return 0;
+    }
+
+    /* Verify JE instruction: 0F 84 37 02 00 00 */
+    if (je_addr[0] != 0x0F || je_addr[1] != 0x84 ||
+        je_addr[2] != 0x37 || je_addr[3] != 0x02) {
+        logmsg("ERROR: Unexpected bytes at addon JE site: %02X %02X %02X %02X",
+               je_addr[0], je_addr[1], je_addr[2], je_addr[3]);
+        return 0;
+    }
+
+    /* Patch 3a: NOP the LoadSceneAsync call → return null */
+    uint8_t nop_call[5] = { 0x33, 0xC0, 0x90, 0x90, 0x90 };  /* xor eax,eax; nop; nop; nop */
+    if (!safe_write(call_addr, nop_call, sizeof(nop_call))) {
+        logmsg("ERROR: Failed to NOP addon LoadSceneAsync call");
+        return 0;
+    }
+
+    /* Patch 3b: Redirect null-check JE to success cleanup
+     *   JMP from RVA 0x32FE018, next_ip = 0x32FE01D
+     *   Target = RVA 0x32FE220 (ZoneLoaded=true + callback + return)
+     *   Displacement = 0x32FE220 - 0x32FE01D = 0x203
+     */
+    uint8_t jmp_patch[6] = { 0xE9, 0x03, 0x02, 0x00, 0x00, 0x90 };  /* jmp +0x203; nop */
+    if (!safe_write(je_addr, jmp_patch, sizeof(jmp_patch))) {
+        logmsg("ERROR: Failed to redirect addon null-check JE");
+        return 0;
+    }
+
+    logmsg("Installed addon skip: NOP call at %p, JMP at %p → success path", call_addr, je_addr);
+    return 1;
+}
+
 /* ── Lazy init from game thread (no background thread) ───────────────── */
 /*
  * Patching is triggered from proxy function calls, which run on the
@@ -841,9 +916,11 @@ static void try_apply_patches(void) {
     int ok1 = install_charlist_trampoline();
     int ok1b = install_createchar_trampoline();
     int ok2 = install_reftype_patch();
+    int ok3 = install_addon_skip_patch();
 
-    logmsg("=== Patches: charlist=%s  createchar=%s  reftype=%s ===",
-           ok1 ? "OK" : "FAIL", ok1b ? "OK" : "FAIL", ok2 ? "OK" : "FAIL");
+    logmsg("=== Patches: charlist=%s  createchar=%s  reftype=%s  addon_skip=%s ===",
+           ok1 ? "OK" : "FAIL", ok1b ? "OK" : "FAIL",
+           ok2 ? "OK" : "FAIL", ok3 ? "OK" : "FAIL");
 
     patch_state = 1;  /* done — stop retrying */
 }

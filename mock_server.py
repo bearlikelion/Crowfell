@@ -490,7 +490,7 @@ class AuthHandler(BaseHTTPRequestHandler):
                 "zoneInfo": {
                     "endpoint": "127.0.0.1:8900",
                     "ipv6_endpoint": "",
-                    "scene_name": "KingdomMainClient",
+                    "scene_name": "KingdomMain",
                     "context_id": 1
                 },
                 "queueInfo": {
