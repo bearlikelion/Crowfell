@@ -112,6 +112,21 @@ static BOOL safe_write(void *addr, const uint8_t *bytes, size_t len) {
     return TRUE;
 }
 
+static void *alloc_executable(size_t len) {
+    return VirtualAlloc(NULL, len, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+}
+
+static void write_abs_jump(uint8_t *dst, const void *target) {
+    uint64_t addr = (uint64_t)(uintptr_t)target;
+    dst[0] = 0xFF;
+    dst[1] = 0x25;
+    dst[2] = 0x00;
+    dst[3] = 0x00;
+    dst[4] = 0x00;
+    dst[5] = 0x00;
+    memcpy(dst + 6, &addr, 8);
+}
+
 /* ── il2cpp API ──────────────────────────────────────────────────────── */
 
 typedef void  Il2CppDomain;
@@ -141,6 +156,7 @@ typedef uint16_t*        (*fn_string_chars)(Il2CppString*);
 typedef int              (*fn_string_length)(Il2CppString*);
 typedef Il2CppArray*     (*fn_array_new)(Il2CppClass*, size_t);
 typedef Il2CppClass*     (*fn_class_get_element_class)(Il2CppClass*);
+typedef size_t           (*fn_array_length)(Il2CppArray*);
 
 static fn_domain_get                 p_domain_get;
 static fn_domain_get_assemblies      p_domain_get_assemblies;
@@ -159,6 +175,7 @@ static fn_string_chars               p_string_chars;
 static fn_string_length              p_string_length;
 static fn_array_new                  p_array_new;
 static fn_class_get_element_class    p_class_get_element_class;
+static fn_array_length               p_array_length;
 
 static HMODULE ga_module = NULL;
 static uint8_t *ga_base = NULL;
@@ -186,6 +203,7 @@ static int load_il2cpp_api(void) {
     LOAD(string_length);
     LOAD(array_new);
     LOAD(class_get_element_class);
+    LOAD(array_length);
     #undef LOAD
     return 1;
 }
@@ -195,6 +213,88 @@ static int load_il2cpp_api(void) {
 static Il2CppClass *klass_CharacterListResponse = NULL;
 static Il2CppClass *klass_CharList = NULL;
 static Il2CppClass *klass_CharacterEntry = NULL;
+static Il2CppClass *klass_StringID = NULL;
+static Il2CppClass *klass_PhysicsConnectionRequest = NULL;
+static Il2CppClass *klass_MemoryStream = NULL;
+static Il2CppClass *klass_BinaryWriter = NULL;
+static Il2CppMethodInfo *method_StringID_MakeStringID = NULL;
+static Il2CppMethodInfo *method_PhysicsConnectionRequest_ctor = NULL;
+static Il2CppMethodInfo *method_PhysicsConnectionRequest_WriteMessage = NULL;
+static Il2CppMethodInfo *method_MemoryStream_ctor = NULL;
+static Il2CppMethodInfo *method_MemoryStream_ToArray = NULL;
+static Il2CppMethodInfo *method_BinaryWriter_ctor = NULL;
+static Il2CppMethodInfo *method_BinaryWriter_Flush = NULL;
+static int logged_string_ids = 0;
+static int logged_request_payload = 0;
+static int logged_loadingworld_request = 0;
+static int logged_loadingworld_auth = 0;
+static int logged_loadingworld_worldready = 0;
+static int logged_ingame_enteredzone = 0;
+static int logged_ingame_physdisc = 0;
+static int logged_ingame_zonetransfer = 0;
+static int logged_ingame_playerleft = 0;
+static int logged_ingame_transitionin = 0;
+static int logged_view_prep = 0;
+static int logged_view_initdock = 0;
+static int logged_basicheader_read = 0;
+static int logged_scene_load = 0;
+static int logged_clientloadscene = 0;
+
+#define RVA_LOADINGWORLD_ONPHYSICSREQUEST 0x32C7430
+typedef void (__attribute__((ms_abi)) *fn_loadingworld_onphysicsrequest_t)(void *self, void *request);
+static fn_loadingworld_onphysicsrequest_t original_loadingworld_onphysicsrequest = NULL;
+
+#define RVA_LOADINGWORLD_ONPHYSACTIONCONFIRMATION 0x32C7220
+typedef void (__attribute__((ms_abi)) *fn_loadingworld_onphysauth_t)(void *self, void *msg);
+static fn_loadingworld_onphysauth_t original_loadingworld_onphysauth = NULL;
+
+#define RVA_LOADINGWORLD_ONWORLDREADY 0x32C86A0
+typedef void (__attribute__((ms_abi)) *fn_loadingworld_onworldready_t)(void *self, int value);
+static fn_loadingworld_onworldready_t original_loadingworld_onworldready = NULL;
+
+#define RVA_INGAME_ONENTEREDZONEANDLOADINGSCREENHIDDEN 0x32C5260
+typedef void (__attribute__((ms_abi)) *fn_ingame_onenteredzone_t)(void *self, int notifications);
+static fn_ingame_onenteredzone_t original_ingame_onenteredzone = NULL;
+
+#define RVA_INGAME_ONPLAYERLEFTPHYSICS 0x32C5650
+typedef void (__attribute__((ms_abi)) *fn_ingame_onplayerleft_t)(void *self, void *msg);
+static fn_ingame_onplayerleft_t original_ingame_onplayerleft = NULL;
+
+#define RVA_INGAME_ONPHYSICSDISCONNECT 0x32C52C0
+typedef void (__attribute__((ms_abi)) *fn_ingame_onphysicsdisconnect_t)(void *self);
+static fn_ingame_onphysicsdisconnect_t original_ingame_onphysicsdisconnect = NULL;
+
+#define RVA_INGAME_ONZONETRANSFERBEGIN 0x32C62B0
+typedef void (__attribute__((ms_abi)) *fn_ingame_onzonetransferbegin_t)(void *self, void *msg);
+static fn_ingame_onzonetransferbegin_t original_ingame_onzonetransferbegin = NULL;
+
+#define RVA_INGAME_ONTRANSITIONIN 0x32C5810
+typedef void (__attribute__((ms_abi)) *fn_ingame_ontransitionin_t)(void *self, void *prevState);
+static fn_ingame_ontransitionin_t original_ingame_ontransitionin = NULL;
+
+#define RVA_VIEWMANAGER_PREPGAMEWINDOWS 0x5183D0
+typedef void (__attribute__((ms_abi)) *fn_viewmanager_prepgamewindows_t)(void *self);
+static fn_viewmanager_prepgamewindows_t original_viewmanager_prepgamewindows = NULL;
+
+#define RVA_VIEWMANAGER_INITIALIZEDOCKANDFLOATINGWINDOWS 0x50F810
+typedef void (__attribute__((ms_abi)) *fn_viewmanager_initdock_t)(void *self, void *prefab);
+static fn_viewmanager_initdock_t original_viewmanager_initdock = NULL;
+
+#define RVA_ANIMDESTRUCTIBLE_TICK 0xAC63C0
+
+#define RVA_BASICHEADER_READ 0x10765D0
+typedef int (__attribute__((ms_abi)) *fn_basicheader_read_t)(void *self, Il2CppArray *sourceBuffer, int offset);
+static fn_basicheader_read_t original_basicheader_read = NULL;
+
+#define RVA_SCENE_LOAD_WRAPPER 0x1B765F0
+typedef void *(__attribute__((ms_abi)) *fn_scene_load_wrapper_t)(Il2CppString *sceneName, int mode, int mustCompleteNextFrame);
+static fn_scene_load_wrapper_t original_scene_load_wrapper = NULL;
+
+#define RVA_CLIENTLOADSCENE_MOVENEXT 0x32FD8F0
+typedef int (__attribute__((ms_abi)) *fn_clientloadscene_movenext_t)(void *self);
+static fn_clientloadscene_movenext_t original_clientloadscene_movenext = NULL;
+
+static char *il2cpp_string_to_utf8(Il2CppString *str, int *out_len);
 
 static int resolve_types(void) {
     Il2CppDomain *domain = p_domain_get();
@@ -257,7 +357,460 @@ static int resolve_types(void) {
         logmsg("WARNING: CharacterEntry not found — characters won't populate");
     }
 
+    for (size_t a = 0; a < asm_count && !klass_StringID; a++) {
+        Il2CppImage *img = p_assembly_get_image(assemblies[a]);
+        if (!img) continue;
+        klass_StringID = p_class_from_name(img, "CrowfallCommonUtilities.Utils", "StringID");
+        if (klass_StringID) {
+            logmsg("Found StringID in %s: %p",
+                   p_image_get_filename(img), klass_StringID);
+        }
+    }
+    if (!klass_StringID) {
+        logmsg("WARNING: StringID not found");
+    } else {
+        method_StringID_MakeStringID =
+            p_class_get_method_from_name(klass_StringID, "MakeStringID", 1);
+        if (!method_StringID_MakeStringID) {
+            logmsg("WARNING: StringID.MakeStringID(string) not found");
+        } else {
+            logmsg("Found StringID.MakeStringID: %p", method_StringID_MakeStringID);
+        }
+    }
+
+    for (size_t a = 0; a < asm_count && !klass_PhysicsConnectionRequest; a++) {
+        Il2CppImage *img = p_assembly_get_image(assemblies[a]);
+        if (!img) continue;
+        klass_PhysicsConnectionRequest =
+            p_class_from_name(img, "NewMessages", "PhysicsConnectionRequest");
+        if (klass_PhysicsConnectionRequest) {
+            logmsg("Found PhysicsConnectionRequest in %s: %p",
+                   p_image_get_filename(img), klass_PhysicsConnectionRequest);
+        }
+    }
+    if (klass_PhysicsConnectionRequest) {
+        method_PhysicsConnectionRequest_ctor =
+            p_class_get_method_from_name(klass_PhysicsConnectionRequest, ".ctor", 0);
+        method_PhysicsConnectionRequest_WriteMessage =
+            p_class_get_method_from_name(klass_PhysicsConnectionRequest, "WriteMessage", 2);
+    }
+
+    for (size_t a = 0; a < asm_count && (!klass_MemoryStream || !klass_BinaryWriter); a++) {
+        Il2CppImage *img = p_assembly_get_image(assemblies[a]);
+        if (!img) continue;
+        if (!klass_MemoryStream) {
+            klass_MemoryStream = p_class_from_name(img, "System.IO", "MemoryStream");
+            if (klass_MemoryStream) {
+                logmsg("Found MemoryStream in %s: %p",
+                       p_image_get_filename(img), klass_MemoryStream);
+            }
+        }
+        if (!klass_BinaryWriter) {
+            klass_BinaryWriter = p_class_from_name(img, "System.IO", "BinaryWriter");
+            if (klass_BinaryWriter) {
+                logmsg("Found BinaryWriter in %s: %p",
+                       p_image_get_filename(img), klass_BinaryWriter);
+            }
+        }
+    }
+    if (klass_MemoryStream) {
+        method_MemoryStream_ctor = p_class_get_method_from_name(klass_MemoryStream, ".ctor", 0);
+        method_MemoryStream_ToArray = p_class_get_method_from_name(klass_MemoryStream, "ToArray", 0);
+    }
+    if (klass_BinaryWriter) {
+        method_BinaryWriter_ctor = p_class_get_method_from_name(klass_BinaryWriter, ".ctor", 1);
+        method_BinaryWriter_Flush = p_class_get_method_from_name(klass_BinaryWriter, "Flush", 0);
+    }
+
     return 1;
+}
+
+static void log_runtime_string_ids(void) {
+    if (logged_string_ids) return;
+    if (!method_StringID_MakeStringID || !p_string_new || !p_runtime_invoke) return;
+
+    static const char *names[] = {
+        "PhysicsConnectionRequest",
+        "PhysicsConnectionResponse",
+        "PhysicsAuthenticationConfirmation",
+        "PhysicsCloseLoadScreenMessage",
+        "PhysicsPingMsg",
+        "PhysicsPingReplyMsg",
+    };
+
+    logged_string_ids = 1;
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        Il2CppString *name = p_string_new(names[i]);
+        void *args[1];
+        Il2CppObject *exc = NULL;
+        int value = 0;
+        args[0] = name;
+        Il2CppObject *ret = p_runtime_invoke(method_StringID_MakeStringID, NULL, args, &exc);
+        if (exc) {
+            logmsg("StringID.MakeStringID(%s) threw exception %p", names[i], exc);
+            continue;
+        }
+        if (!ret) {
+            logmsg("StringID.MakeStringID(%s) returned null", names[i]);
+            continue;
+        }
+        value = *(int *)((uint8_t *)ret + sizeof(void *) * 2);
+        logmsg("StringID.MakeStringID(%s) = %d (0x%08X)",
+               names[i], value, (unsigned int)value);
+    }
+}
+
+static void log_request_payload_bytes(void) {
+    if (logged_request_payload) return;
+    if (!klass_PhysicsConnectionRequest || !klass_MemoryStream || !klass_BinaryWriter) return;
+    if (!method_PhysicsConnectionRequest_ctor || !method_PhysicsConnectionRequest_WriteMessage) return;
+    if (!method_MemoryStream_ctor || !method_MemoryStream_ToArray || !method_BinaryWriter_ctor) return;
+
+    logged_request_payload = 1;
+
+    Il2CppObject *exc = NULL;
+    Il2CppObject *request = p_object_new(klass_PhysicsConnectionRequest);
+    Il2CppObject *ms = p_object_new(klass_MemoryStream);
+    Il2CppObject *bw = p_object_new(klass_BinaryWriter);
+    if (!request || !ms || !bw) {
+        logmsg("Unable to allocate request serialization objects");
+        return;
+    }
+
+    p_runtime_invoke(method_PhysicsConnectionRequest_ctor, request, NULL, &exc);
+    if (exc) { logmsg("PhysicsConnectionRequest ctor threw %p", exc); return; }
+    p_runtime_invoke(method_MemoryStream_ctor, ms, NULL, &exc);
+    if (exc) { logmsg("MemoryStream ctor threw %p", exc); return; }
+
+    {
+        void *args[1];
+        args[0] = ms;
+        exc = NULL;
+        p_runtime_invoke(method_BinaryWriter_ctor, bw, args, &exc);
+        if (exc) { logmsg("BinaryWriter ctor threw %p", exc); return; }
+    }
+
+    {
+        void *args[2];
+        args[0] = ms;
+        args[1] = bw;
+        exc = NULL;
+        p_runtime_invoke(method_PhysicsConnectionRequest_WriteMessage, request, args, &exc);
+        if (exc) { logmsg("PhysicsConnectionRequest.WriteMessage threw %p", exc); return; }
+    }
+
+    if (method_BinaryWriter_Flush) {
+        exc = NULL;
+        p_runtime_invoke(method_BinaryWriter_Flush, bw, NULL, &exc);
+        if (exc) { logmsg("BinaryWriter.Flush threw %p", exc); return; }
+    }
+
+    exc = NULL;
+    Il2CppArray *bytes = (Il2CppArray *)p_runtime_invoke(method_MemoryStream_ToArray, ms, NULL, &exc);
+    if (exc) { logmsg("MemoryStream.ToArray threw %p", exc); return; }
+    if (!bytes) { logmsg("MemoryStream.ToArray returned null"); return; }
+
+    {
+        size_t len = p_array_length(bytes);
+        uint8_t *data = (uint8_t *)bytes + 0x20;
+        char line[256];
+        logmsg("PhysicsConnectionRequest payload from client runtime (%u bytes):", (unsigned int)len);
+        for (size_t i = 0; i < len; i += 16) {
+            int pos = 0;
+            pos += wsprintfA(line + pos, "  %04X:", (unsigned int)i);
+            for (size_t j = i; j < len && j < i + 16; j++) {
+                pos += wsprintfA(line + pos, " %02X", data[j]);
+            }
+            logmsg("%s", line);
+        }
+    }
+}
+
+static void __attribute__((ms_abi))
+hook_loadingworld_onphysicsrequest(void *self, void *request) {
+    if (!logged_loadingworld_request) {
+        logged_loadingworld_request = 1;
+        logmsg("GameStateLoadingWorld.OnPhysicsConnectionRequest entered self=%p request=%p",
+               self, request);
+    } else {
+        logmsg("GameStateLoadingWorld.OnPhysicsConnectionRequest entered self=%p request=%p",
+               self, request);
+    }
+    if (original_loadingworld_onphysicsrequest) {
+        original_loadingworld_onphysicsrequest(self, request);
+    }
+}
+
+static void __attribute__((ms_abi))
+hook_loadingworld_onphysauth(void *self, void *msg) {
+    Il2CppString *session_guid = msg ? *(Il2CppString **)((uint8_t *)msg + 0x78) : NULL;
+    int len = 0;
+    char *guid = il2cpp_string_to_utf8(session_guid, &len);
+    char *zone = self ? il2cpp_string_to_utf8(*(Il2CppString **)((uint8_t *)self + 0x58), &len) : NULL;
+
+    if (!logged_loadingworld_auth) {
+        logged_loadingworld_auth = 1;
+    }
+    logmsg("GameStateLoadingWorld.OnPhysicsAuthenticationConfirmation self=%p msg=%p session=%s zone=%s context=%d registeredDisconnect=%d",
+           self, msg,
+           guid ? guid : "<null>",
+           zone ? zone : "<null>",
+           self ? *(int *)((uint8_t *)self + 0x60) : -1,
+           self ? *(uint8_t *)((uint8_t *)self + 0x64) : -1);
+
+    if (original_loadingworld_onphysauth) {
+        original_loadingworld_onphysauth(self, msg);
+    }
+
+    if (guid) HeapFree(GetProcessHeap(), 0, guid);
+    if (zone) HeapFree(GetProcessHeap(), 0, zone);
+}
+
+static void __attribute__((ms_abi))
+hook_loadingworld_onworldready(void *self, int value) {
+    if (!logged_loadingworld_worldready) {
+        logged_loadingworld_worldready = 1;
+    }
+    logmsg("GameStateLoadingWorld.OnWorldReady self=%p value=%d zone=%p context=%d registeredDisconnect=%d",
+           self, value,
+           self ? *(void **)((uint8_t *)self + 0x58) : NULL,
+           self ? *(int *)((uint8_t *)self + 0x60) : -1,
+           self ? *(uint8_t *)((uint8_t *)self + 0x64) : -1);
+
+    if (original_loadingworld_onworldready) {
+        original_loadingworld_onworldready(self, value);
+    }
+}
+
+static void __attribute__((ms_abi))
+hook_ingame_onenteredzone(void *self, int notifications) {
+    logged_ingame_enteredzone = 1;
+    logmsg("GameStateInGame.OnEnteredZoneAndLoadingScreenHidden self=%p notifications=%d enteredZone=%d isLoggingOut=%d",
+           self, notifications,
+           self ? *(uint8_t *)((uint8_t *)self + 0x52) : -1,
+           self ? *(uint8_t *)((uint8_t *)self + 0x60) : -1);
+    if (original_ingame_onenteredzone) {
+        original_ingame_onenteredzone(self, notifications);
+    }
+}
+
+static void __attribute__((ms_abi))
+hook_ingame_onphysicsdisconnect(void *self) {
+    logged_ingame_physdisc = 1;
+    logmsg("GameStateInGame.OnPhysicsDisconnect self=%p enteredZone=%d isLoggingOut=%d inRuneGateQueue=%d",
+           self,
+           self ? *(uint8_t *)((uint8_t *)self + 0x52) : -1,
+           self ? *(uint8_t *)((uint8_t *)self + 0x60) : -1,
+           self ? *(uint8_t *)((uint8_t *)self + 0x61) : -1);
+    if (original_ingame_onphysicsdisconnect) {
+        original_ingame_onphysicsdisconnect(self);
+    }
+}
+
+static void __attribute__((ms_abi))
+hook_ingame_onplayerleft(void *self, void *msg) {
+    logged_ingame_playerleft = 1;
+    logmsg("GameStateInGame.OnPlayerLeftPhysics self=%p msg=%p", self, msg);
+    if (original_ingame_onplayerleft) {
+        original_ingame_onplayerleft(self, msg);
+    }
+}
+
+static void __attribute__((ms_abi))
+hook_ingame_onzonetransferbegin(void *self, void *msg) {
+    logged_ingame_zonetransfer = 1;
+    logmsg("GameStateInGame.OnZoneTransferBegin self=%p msg=%p", self, msg);
+    if (original_ingame_onzonetransferbegin) {
+        original_ingame_onzonetransferbegin(self, msg);
+    }
+}
+
+static void __attribute__((ms_abi))
+hook_ingame_ontransitionin(void *self, void *prevState) {
+    logged_ingame_transitionin = 1;
+    logmsg("GameStateInGame.OnTransitionIn enter self=%p prev=%p disconnectTime=%f warnTime=%f usesAfk=%d timeoutWarn=%d enteredZone=%d isLoggingOut=%d",
+           self, prevState,
+           self ? *(float *)((uint8_t *)self + 0x48) : 0.0f,
+           self ? *(float *)((uint8_t *)self + 0x4C) : 0.0f,
+           self ? *(uint8_t *)((uint8_t *)self + 0x50) : -1,
+           self ? *(uint8_t *)((uint8_t *)self + 0x51) : -1,
+           self ? *(uint8_t *)((uint8_t *)self + 0x52) : -1,
+           self ? *(uint8_t *)((uint8_t *)self + 0x60) : -1);
+    if (original_ingame_ontransitionin) {
+        original_ingame_ontransitionin(self, prevState);
+    }
+    /* Without a real entity spawn from the zone server, _enteredZone never becomes 1.
+     * Force it here so PhysicsCloseLoadScreenMessage's handler will call
+     * OnEnteredZoneAndLoadingScreenHidden and close the loading screen. */
+    if (self) {
+        *(uint8_t *)((uint8_t *)self + 0x52) = 1;
+        logmsg("GameStateInGame.OnTransitionIn forced _enteredZone=1");
+    }
+    logmsg("GameStateInGame.OnTransitionIn exit self=%p enteredZone=%d isLoggingOut=%d inRuneGateQueue=%d",
+           self,
+           self ? *(uint8_t *)((uint8_t *)self + 0x52) : -1,
+           self ? *(uint8_t *)((uint8_t *)self + 0x60) : -1,
+           self ? *(uint8_t *)((uint8_t *)self + 0x61) : -1);
+}
+
+static void __attribute__((ms_abi))
+hook_viewmanager_prepgamewindows(void *self) {
+    logged_view_prep = 1;
+    logmsg("ViewManager.PrepGameWindows enter self=%p floatingMaster=%p dockRoot=%p",
+           self,
+           self ? *(void **)((uint8_t *)self + 0x180) : NULL,
+           self ? *(void **)((uint8_t *)self + 0x3F0) : NULL);
+    if (original_viewmanager_prepgamewindows) {
+        original_viewmanager_prepgamewindows(self);
+    }
+    logmsg("ViewManager.PrepGameWindows exit self=%p floatingMasterAfter=%p",
+           self, self ? *(void **)((uint8_t *)self + 0x428) : NULL);
+}
+
+static void __attribute__((ms_abi))
+hook_viewmanager_initdock(void *self, void *prefab) {
+    logged_view_initdock = 1;
+    logmsg("ViewManager.InitializeDockAndFloatingWindows enter self=%p prefab=%p floatingMaster=%p dockRoot=%p",
+           self, prefab,
+           self ? *(void **)((uint8_t *)self + 0x428) : NULL,
+           self ? *(void **)((uint8_t *)self + 0x3F0) : NULL);
+    if (original_viewmanager_initdock) {
+        original_viewmanager_initdock(self, prefab);
+    }
+    logmsg("ViewManager.InitializeDockAndFloatingWindows exit self=%p floatingMaster=%p",
+           self, self ? *(void **)((uint8_t *)self + 0x428) : NULL);
+}
+
+static int __attribute__((ms_abi))
+hook_basicheader_read(void *self, Il2CppArray *sourceBuffer, int offset) {
+    int result = 0;
+
+    if (original_basicheader_read) {
+        result = original_basicheader_read(self, sourceBuffer, offset);
+    }
+
+    if (result && self) {
+        int message_length = *(int *)((uint8_t *)self + 0x10);
+        int message_type = *(int *)((uint8_t *)self + 0x14);
+        int message_number = *(int *)((uint8_t *)self + 0x18);
+        uint8_t byte1 = *(uint8_t *)((uint8_t *)self + 0x1C);
+        uint8_t byte2 = *(uint8_t *)((uint8_t *)self + 0x1D);
+
+        logmsg("BasicHeader.Read success offset=%d b1=%02X b2=%02X len=%d type=%d (0x%08X) num=%d",
+               offset, byte1, byte2, message_length, message_type, (unsigned int)message_type, message_number);
+
+        if (sourceBuffer && p_array_length) {
+            size_t len = p_array_length(sourceBuffer);
+            if ((size_t)offset < len) {
+                uint8_t *data = (uint8_t *)sourceBuffer + 0x20 + offset;
+                size_t remain = len - (size_t)offset;
+                size_t count = remain < 16 ? remain : 16;
+                char line[256];
+                int pos = 0;
+                pos += wsprintfA(line + pos, "  source:");
+                for (size_t i = 0; i < count; i++) {
+                    pos += wsprintfA(line + pos, " %02X", data[i]);
+                }
+                logmsg("%s", line);
+            }
+        }
+        logged_basicheader_read = 1;
+    }
+
+    return result;
+}
+
+static void * __attribute__((ms_abi))
+hook_scene_load_wrapper(Il2CppString *sceneName, int mode, int mustCompleteNextFrame) {
+    void *result;
+    int len = 0;
+    char *name = il2cpp_string_to_utf8(sceneName, &len);
+
+    if (name && len > 0) {
+        logmsg("Scene load request name=%s mode=%d mustCompleteNextFrame=%d",
+               name, mode, mustCompleteNextFrame);
+    } else {
+        logmsg("Scene load request name=<null> mode=%d mustCompleteNextFrame=%d",
+               mode, mustCompleteNextFrame);
+    }
+    logged_scene_load = 1;
+
+    result = original_scene_load_wrapper ? original_scene_load_wrapper(sceneName, mode, mustCompleteNextFrame) : NULL;
+
+    if (name && len > 0) {
+        logmsg("Scene load result name=%s async=%p", name, result);
+        if (lstrcmpiA(name, "KingdomMainClient") == 0 && result) {
+            uint8_t *raw = (uint8_t *)result;
+            logmsg("  KingdomMainClient AsyncOperation raw=%02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+                   raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+                   raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14], raw[15]);
+        }
+    } else {
+        logmsg("Scene load result name=<null> async=%p", result);
+    }
+
+    if (name) HeapFree(GetProcessHeap(), 0, name);
+    return result;
+}
+
+static int __attribute__((ms_abi))
+hook_clientloadscene_movenext(void *self) {
+    int result;
+    int state = self ? *(int *)((uint8_t *)self + 0x10) : -999;
+    Il2CppString *zone_scene = self ? *(Il2CppString **)((uint8_t *)self + 0x20) : NULL;
+    void *zone_manager = self ? *(void **)((uint8_t *)self + 0x28) : NULL;
+    void *callback = self ? *(void **)((uint8_t *)self + 0x30) : NULL;
+    void *streaming_zone = self ? *(void **)((uint8_t *)self + 0x38) : NULL;
+    void *world_transform = self ? *(void **)((uint8_t *)self + 0x40) : NULL;
+    void *async_load = self ? *(void **)((uint8_t *)self + 0x48) : NULL;
+    void *async_unload = self ? *(void **)((uint8_t *)self + 0x50) : NULL;
+    int zone_len = 0;
+    int addon_len = 0;
+    int main_len = 0;
+    int current_len = 0;
+    char *zone_name = il2cpp_string_to_utf8(zone_scene, &zone_len);
+    char *addon_name = NULL;
+    char *main_zone_name = NULL;
+    char *current_scene_name = NULL;
+
+    if (streaming_zone) {
+        addon_name = il2cpp_string_to_utf8(*(Il2CppString **)((uint8_t *)streaming_zone + 0x18), &addon_len);
+    }
+    if (zone_manager) {
+        main_zone_name = il2cpp_string_to_utf8(*(Il2CppString **)((uint8_t *)zone_manager + 0x18), &main_len);
+        current_scene_name = il2cpp_string_to_utf8(*(Il2CppString **)((uint8_t *)zone_manager + 0x38), &current_len);
+    }
+
+    logmsg("ClientLoadScene.MoveNext state=%d zone=%s manager=%p callback=%p stream=%p world=%p aload=%p aunload=%p",
+           state,
+           (zone_name && zone_len > 0) ? zone_name : "<null>",
+           zone_manager, callback, streaming_zone, world_transform, async_load, async_unload);
+
+    if (zone_manager) {
+        logmsg("  ZoneManager main=%s current=%s flags loaded=%d addons=%d error=%d sceneLoaded=%d clientObjects=%p loadingOp=%p",
+               (main_zone_name && main_len > 0) ? main_zone_name : "<null>",
+               (current_scene_name && current_len > 0) ? current_scene_name : "<null>",
+               *(uint8_t *)((uint8_t *)zone_manager + 0x30),
+               *(uint8_t *)((uint8_t *)zone_manager + 0x31),
+               *(uint8_t *)((uint8_t *)zone_manager + 0x32),
+               *(uint8_t *)((uint8_t *)zone_manager + 0x40),
+               *(void **)((uint8_t *)zone_manager + 0x48),
+               *(void **)((uint8_t *)zone_manager + 0x50));
+    }
+
+    if (streaming_zone) {
+        logmsg("  StreamingZone addon=%s", (addon_name && addon_len > 0) ? addon_name : "<null>");
+    }
+
+    if (zone_name) HeapFree(GetProcessHeap(), 0, zone_name);
+    if (addon_name) HeapFree(GetProcessHeap(), 0, addon_name);
+    if (main_zone_name) HeapFree(GetProcessHeap(), 0, main_zone_name);
+    if (current_scene_name) HeapFree(GetProcessHeap(), 0, current_scene_name);
+
+    logged_clientloadscene = 1;
+    result = original_clientloadscene_movenext ? original_clientloadscene_movenext(self) : 0;
+    logmsg("ClientLoadScene.MoveNext result=%d next_state=%d", result, self ? *(int *)((uint8_t *)self + 0x10) : -999);
+    return result;
 }
 
 /* ── Hook 1: Deserialize<CharacterListResponse> trampoline ───────────── */
@@ -872,6 +1425,585 @@ static int install_addon_skip_patch(void) {
     return 1;
 }
 
+/* ── Hook 4: Log entry into GameStateLoadingWorld.OnPhysicsConnectionRequest ── */
+
+static int install_loadingworld_onphysicsrequest_hook(void) {
+    uint8_t *target = ga_base + RVA_LOADINGWORLD_ONPHYSICSREQUEST;
+    uint8_t *trampoline;
+    uint8_t *p;
+    uint64_t addr;
+
+    /* Verify the exact prologue we reverse engineered. */
+    if (target[0] != 0x40 || target[1] != 0x53 ||
+        target[2] != 0x48 || target[3] != 0x83 || target[4] != 0xEC || target[5] != 0x20 ||
+        target[6] != 0x80 || target[7] != 0x3D) {
+        logmsg("ERROR: Unexpected bytes at LoadingWorld.OnPhysicsConnectionRequest: %02X %02X %02X %02X %02X %02X %02X %02X",
+               target[0], target[1], target[2], target[3], target[4], target[5], target[6], target[7]);
+        return 0;
+    }
+
+    trampoline = (uint8_t *)alloc_executable(128);
+    if (!trampoline) {
+        logmsg("ERROR: Failed to allocate trampoline for LoadingWorld.OnPhysicsConnectionRequest");
+        return 0;
+    }
+
+    p = trampoline;
+
+    /* push rbx ; sub rsp, 0x20 */
+    *p++ = 0x40; *p++ = 0x53;
+    *p++ = 0x48; *p++ = 0x83; *p++ = 0xEC; *p++ = 0x20;
+
+    /* mov rax, <flag_addr> ; cmp byte ptr [rax], 0 */
+    *p++ = 0x48; *p++ = 0xB8;
+    addr = (uint64_t)(uintptr_t)(ga_base + 0x04471E58);
+    memcpy(p, &addr, 8); p += 8;
+    *p++ = 0x80; *p++ = 0x38; *p++ = 0x00;
+
+    /* jne branch_taken */
+    *p++ = 0x75; *p++ = 0x0C;
+
+    /* mov rax, <original+0x0f> ; jmp rax */
+    *p++ = 0x48; *p++ = 0xB8;
+    addr = (uint64_t)(uintptr_t)(target + 0x0F);
+    memcpy(p, &addr, 8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+
+    /* branch_taken: mov rax, <original+0x82> ; jmp rax */
+    *p++ = 0x48; *p++ = 0xB8;
+    addr = (uint64_t)(uintptr_t)(target + 0x82);
+    memcpy(p, &addr, 8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+
+    original_loadingworld_onphysicsrequest = (fn_loadingworld_onphysicsrequest_t)trampoline;
+
+    {
+        uint8_t jmp[14];
+        write_abs_jump(jmp, hook_loadingworld_onphysicsrequest);
+        if (!safe_write(target, jmp, sizeof(jmp))) {
+            logmsg("ERROR: Failed to patch LoadingWorld.OnPhysicsConnectionRequest");
+            return 0;
+        }
+    }
+
+    logmsg("Installed LoadingWorld.OnPhysicsConnectionRequest hook at %p (trampoline=%p)",
+           target, trampoline);
+    return 1;
+}
+
+static int install_loadingworld_onphysauth_hook(void) {
+    uint8_t *target = ga_base + RVA_LOADINGWORLD_ONPHYSACTIONCONFIRMATION;
+    uint8_t *trampoline;
+    uint8_t *p;
+    uint64_t addr;
+
+    if (target[0] != 0x40 || target[1] != 0x53 ||
+        target[2] != 0x48 || target[3] != 0x83 || target[4] != 0xEC || target[5] != 0x20 ||
+        target[6] != 0x80 || target[7] != 0x3D) {
+        logmsg("ERROR: Unexpected bytes at LoadingWorld.OnPhysicsAuthenticationConfirmation: %02X %02X %02X %02X %02X %02X %02X %02X",
+               target[0], target[1], target[2], target[3], target[4], target[5], target[6], target[7]);
+        return 0;
+    }
+
+    trampoline = (uint8_t *)alloc_executable(128);
+    if (!trampoline) {
+        logmsg("ERROR: Failed to allocate trampoline for LoadingWorld.OnPhysicsAuthenticationConfirmation");
+        return 0;
+    }
+
+    p = trampoline;
+
+    /* push rbx ; sub rsp, 0x20 */
+    *p++ = 0x40; *p++ = 0x53;
+    *p++ = 0x48; *p++ = 0x83; *p++ = 0xEC; *p++ = 0x20;
+
+    /* mov rax, <flag_addr> ; cmp byte ptr [rax], 0 */
+    *p++ = 0x48; *p++ = 0xB8;
+    addr = (uint64_t)(uintptr_t)(ga_base + 0x04471E59);
+    memcpy(p, &addr, 8); p += 8;
+    *p++ = 0x80; *p++ = 0x38; *p++ = 0x00;
+
+    /* mov rbx, rdx */
+    *p++ = 0x48; *p++ = 0x8B; *p++ = 0xDA;
+
+    /* jne branch_taken */
+    *p++ = 0x75; *p++ = 0x0C;
+
+    /* mov rax, <original+0x12> ; jmp rax */
+    *p++ = 0x48; *p++ = 0xB8;
+    addr = (uint64_t)(uintptr_t)(target + 0x12);
+    memcpy(p, &addr, 8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+
+    /* branch_taken: mov rax, <original+0x79> ; jmp rax */
+    *p++ = 0x48; *p++ = 0xB8;
+    addr = (uint64_t)(uintptr_t)(target + 0x79);
+    memcpy(p, &addr, 8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+
+    original_loadingworld_onphysauth = (fn_loadingworld_onphysauth_t)trampoline;
+
+    {
+        uint8_t jmp[14];
+        write_abs_jump(jmp, hook_loadingworld_onphysauth);
+        if (!safe_write(target, jmp, sizeof(jmp))) {
+            logmsg("ERROR: Failed to patch LoadingWorld.OnPhysicsAuthenticationConfirmation");
+            return 0;
+        }
+    }
+
+    logmsg("Installed LoadingWorld.OnPhysicsAuthenticationConfirmation hook at %p (trampoline=%p)",
+           target, trampoline);
+    return 1;
+}
+
+static int install_loadingworld_onworldready_hook(void) {
+    uint8_t *target = ga_base + RVA_LOADINGWORLD_ONWORLDREADY;
+    uint8_t *trampoline;
+    uint8_t *p;
+    uint64_t addr;
+
+    if (target[0] != 0x48 || target[1] != 0x89 || target[2] != 0x5C || target[3] != 0x24 ||
+        target[4] != 0x08 || target[5] != 0x57 || target[6] != 0x48 || target[7] != 0x83) {
+        logmsg("ERROR: Unexpected bytes at LoadingWorld.OnWorldReady: %02X %02X %02X %02X %02X %02X %02X %02X",
+               target[0], target[1], target[2], target[3], target[4], target[5], target[6], target[7]);
+        return 0;
+    }
+
+    trampoline = (uint8_t *)alloc_executable(128);
+    if (!trampoline) {
+        logmsg("ERROR: Failed to allocate trampoline for LoadingWorld.OnWorldReady");
+        return 0;
+    }
+
+    p = trampoline;
+
+    /* mov [rsp+0x08],rbx ; push rdi ; sub rsp,0x20 */
+    *p++ = 0x48; *p++ = 0x89; *p++ = 0x5C; *p++ = 0x24; *p++ = 0x08;
+    *p++ = 0x57;
+    *p++ = 0x48; *p++ = 0x83; *p++ = 0xEC; *p++ = 0x20;
+
+    /* mov rax, <flag_addr> ; cmp byte ptr [rax], 0 */
+    *p++ = 0x48; *p++ = 0xB8;
+    addr = (uint64_t)(uintptr_t)(ga_base + 0x04471E5A);
+    memcpy(p, &addr, 8); p += 8;
+    *p++ = 0x80; *p++ = 0x38; *p++ = 0x00;
+
+    /* mov rdi, rcx */
+    *p++ = 0x48; *p++ = 0x8B; *p++ = 0xF9;
+
+    /* jne branch_taken */
+    *p++ = 0x75; *p++ = 0x0C;
+
+    /* mov rax, <original+0x16> ; jmp rax */
+    *p++ = 0x48; *p++ = 0xB8;
+    addr = (uint64_t)(uintptr_t)(target + 0x16);
+    memcpy(p, &addr, 8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+
+    /* branch_taken: mov rax, <original+0x29> ; jmp rax */
+    *p++ = 0x48; *p++ = 0xB8;
+    addr = (uint64_t)(uintptr_t)(target + 0x29);
+    memcpy(p, &addr, 8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+
+    original_loadingworld_onworldready = (fn_loadingworld_onworldready_t)trampoline;
+
+    {
+        uint8_t patch[14];
+        write_abs_jump(patch, hook_loadingworld_onworldready);
+        if (!safe_write(target, patch, sizeof(patch))) {
+            logmsg("ERROR: Failed to patch LoadingWorld.OnWorldReady");
+            return 0;
+        }
+    }
+
+    logmsg("Installed LoadingWorld.OnWorldReady hook at %p (trampoline=%p)", target, trampoline);
+    return 1;
+}
+
+static int install_ingame_onenteredzone_hook(void) {
+    uint8_t *target = ga_base + RVA_INGAME_ONENTEREDZONEANDLOADINGSCREENHIDDEN;
+    uint8_t *trampoline, *p; uint64_t addr;
+    if (target[0] != 0x40 || target[1] != 0x53 || target[2] != 0x48 || target[3] != 0x83 ||
+        target[4] != 0xEC || target[5] != 0x20 || target[6] != 0x80 || target[7] != 0x3D) {
+        logmsg("ERROR: Unexpected bytes at InGame.OnEnteredZoneAndLoadingScreenHidden: %02X %02X %02X %02X %02X %02X %02X %02X",
+               target[0], target[1], target[2], target[3], target[4], target[5], target[6], target[7]);
+        return 0;
+    }
+    trampoline = (uint8_t *)alloc_executable(128);
+    if (!trampoline) return 0;
+    p = trampoline;
+    *p++ = 0x40; *p++ = 0x53;
+    *p++ = 0x48; *p++ = 0x83; *p++ = 0xEC; *p++ = 0x20;
+    *p++ = 0x48; *p++ = 0xB8; addr = (uint64_t)(uintptr_t)(ga_base + 0x04471E46); memcpy(p,&addr,8); p += 8;
+    *p++ = 0x80; *p++ = 0x38; *p++ = 0x00;
+    *p++ = 0x48; *p++ = 0x8B; *p++ = 0xD9;
+    *p++ = 0x75; *p++ = 0x0C;
+    *p++ = 0x48; *p++ = 0xB8; addr = (uint64_t)(uintptr_t)(target + 0x10); memcpy(p,&addr,8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+    *p++ = 0x48; *p++ = 0xB8; addr = (uint64_t)(uintptr_t)(target + 0x25); memcpy(p,&addr,8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+    original_ingame_onenteredzone = (fn_ingame_onenteredzone_t)trampoline;
+    { uint8_t jmp[14]; write_abs_jump(jmp, hook_ingame_onenteredzone); if (!safe_write(target, jmp, sizeof(jmp))) return 0; }
+    logmsg("Installed InGame.OnEnteredZoneAndLoadingScreenHidden hook at %p (trampoline=%p)", target, trampoline);
+    return 1;
+}
+
+static int install_ingame_onphysicsdisconnect_hook(void) {
+    uint8_t *target = ga_base + RVA_INGAME_ONPHYSICSDISCONNECT;
+    uint8_t *trampoline, *p; uint64_t addr;
+    if (target[0] != 0x40 || target[1] != 0x57 || target[2] != 0x48 || target[3] != 0x83 ||
+        target[4] != 0xEC || target[5] != 0x20 || target[6] != 0x80 || target[7] != 0x3D) {
+        logmsg("ERROR: Unexpected bytes at InGame.OnPhysicsDisconnect: %02X %02X %02X %02X %02X %02X %02X %02X",
+               target[0], target[1], target[2], target[3], target[4], target[5], target[6], target[7]);
+        return 0;
+    }
+    trampoline = (uint8_t *)alloc_executable(128);
+    if (!trampoline) return 0;
+    p = trampoline;
+    *p++ = 0x40; *p++ = 0x57;
+    *p++ = 0x48; *p++ = 0x83; *p++ = 0xEC; *p++ = 0x20;
+    *p++ = 0x48; *p++ = 0xB8; addr = (uint64_t)(uintptr_t)(ga_base + 0x04471E4B); memcpy(p,&addr,8); p += 8;
+    *p++ = 0x80; *p++ = 0x38; *p++ = 0x00;
+    *p++ = 0x48; *p++ = 0x8B; *p++ = 0xF9;
+    *p++ = 0x75; *p++ = 0x0C;
+    *p++ = 0x48; *p++ = 0xB8; addr = (uint64_t)(uintptr_t)(target + 0x10); memcpy(p,&addr,8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+    *p++ = 0x48; *p++ = 0xB8; addr = (uint64_t)(uintptr_t)(target + 0x85); memcpy(p,&addr,8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+    original_ingame_onphysicsdisconnect = (fn_ingame_onphysicsdisconnect_t)trampoline;
+    { uint8_t jmp[14]; write_abs_jump(jmp, hook_ingame_onphysicsdisconnect); if (!safe_write(target, jmp, sizeof(jmp))) return 0; }
+    logmsg("Installed InGame.OnPhysicsDisconnect hook at %p (trampoline=%p)", target, trampoline);
+    return 1;
+}
+
+static int install_ingame_onplayerleft_hook(void) {
+    uint8_t *target = ga_base + RVA_INGAME_ONPLAYERLEFTPHYSICS;
+    uint8_t *trampoline, *p; uint64_t addr;
+    if (target[0] != 0x48 || target[1] != 0x83 || target[2] != 0xEC || target[3] != 0x28 ||
+        target[4] != 0x80 || target[5] != 0x3D) {
+        logmsg("ERROR: Unexpected bytes at InGame.OnPlayerLeftPhysics: %02X %02X %02X %02X %02X %02X",
+               target[0], target[1], target[2], target[3], target[4], target[5]);
+        return 0;
+    }
+    trampoline = (uint8_t *)alloc_executable(128);
+    if (!trampoline) return 0;
+    p = trampoline;
+    *p++ = 0x48; *p++ = 0x83; *p++ = 0xEC; *p++ = 0x28;
+    *p++ = 0x48; *p++ = 0xB8; addr = (uint64_t)(uintptr_t)(ga_base + 0x04471E4A); memcpy(p,&addr,8); p += 8;
+    *p++ = 0x80; *p++ = 0x38; *p++ = 0x00;
+    *p++ = 0x75; *p++ = 0x0C;
+    *p++ = 0x48; *p++ = 0xB8; addr = (uint64_t)(uintptr_t)(target + 0x0B); memcpy(p,&addr,8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+    *p++ = 0x48; *p++ = 0xB8; addr = (uint64_t)(uintptr_t)(target + 0x50); memcpy(p,&addr,8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+    original_ingame_onplayerleft = (fn_ingame_onplayerleft_t)trampoline;
+    { uint8_t jmp[14]; write_abs_jump(jmp, hook_ingame_onplayerleft); if (!safe_write(target, jmp, sizeof(jmp))) return 0; }
+    logmsg("Installed InGame.OnPlayerLeftPhysics hook at %p (trampoline=%p)", target, trampoline);
+    return 1;
+}
+
+static int install_ingame_onzonetransferbegin_hook(void) {
+    uint8_t *target = ga_base + RVA_INGAME_ONZONETRANSFERBEGIN;
+    uint8_t *trampoline, *p; uint64_t addr;
+    if (target[0] != 0x40 || target[1] != 0x53 || target[2] != 0x41 || target[3] != 0x54 ||
+        target[4] != 0x48 || target[5] != 0x83 || target[6] != 0xEC || target[7] != 0x48) {
+        logmsg("ERROR: Unexpected bytes at InGame.OnZoneTransferBegin: %02X %02X %02X %02X %02X %02X %02X %02X",
+               target[0], target[1], target[2], target[3], target[4], target[5], target[6], target[7]);
+        return 0;
+    }
+    trampoline = (uint8_t *)alloc_executable(160);
+    if (!trampoline) return 0;
+    p = trampoline;
+    *p++ = 0x40; *p++ = 0x53; *p++ = 0x41; *p++ = 0x54;
+    *p++ = 0x48; *p++ = 0x83; *p++ = 0xEC; *p++ = 0x48;
+    *p++ = 0x48; *p++ = 0xB8; addr = (uint64_t)(uintptr_t)(ga_base + 0x04471E49); memcpy(p,&addr,8); p += 8;
+    *p++ = 0x80; *p++ = 0x38; *p++ = 0x00;
+    *p++ = 0x48; *p++ = 0x8B; *p++ = 0xDA;
+    *p++ = 0x4C; *p++ = 0x8B; *p++ = 0xE1;
+    *p++ = 0x75; *p++ = 0x0C;
+    *p++ = 0x48; *p++ = 0xB8; addr = (uint64_t)(uintptr_t)(target + 0x15); memcpy(p,&addr,8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+    *p++ = 0x48; *p++ = 0xB8; addr = (uint64_t)(uintptr_t)(target + 0x7E); memcpy(p,&addr,8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+    original_ingame_onzonetransferbegin = (fn_ingame_onzonetransferbegin_t)trampoline;
+    { uint8_t jmp[14]; write_abs_jump(jmp, hook_ingame_onzonetransferbegin); if (!safe_write(target, jmp, sizeof(jmp))) return 0; }
+    logmsg("Installed InGame.OnZoneTransferBegin hook at %p (trampoline=%p)", target, trampoline);
+    return 1;
+}
+
+static int install_ingame_ontransitionin_hook(void) {
+    uint8_t *target = ga_base + RVA_INGAME_ONTRANSITIONIN;
+    uint8_t *trampoline;
+    uint8_t *p;
+    uint64_t addr;
+
+    if (target[0] != 0x48 || target[1] != 0x89 || target[2] != 0x5C || target[3] != 0x24 ||
+        target[4] != 0x10 || target[5] != 0x57 || target[6] != 0x48 || target[7] != 0x83) {
+        logmsg("ERROR: Unexpected bytes at InGame.OnTransitionIn: %02X %02X %02X %02X %02X %02X %02X %02X",
+               target[0], target[1], target[2], target[3], target[4], target[5], target[6], target[7]);
+        return 0;
+    }
+
+    trampoline = (uint8_t *)alloc_executable(160);
+    if (!trampoline) return 0;
+    p = trampoline;
+
+    /* mov [rsp+0x10],rbx ; push rdi ; sub rsp,0x20 */
+    *p++ = 0x48; *p++ = 0x89; *p++ = 0x5C; *p++ = 0x24; *p++ = 0x10;
+    *p++ = 0x57;
+    *p++ = 0x48; *p++ = 0x83; *p++ = 0xEC; *p++ = 0x20;
+
+    /* mov rax, <flag_addr> ; cmp byte ptr [rax], 0 */
+    *p++ = 0x48; *p++ = 0xB8;
+    addr = (uint64_t)(uintptr_t)(ga_base + 0x04471E45);
+    memcpy(p, &addr, 8); p += 8;
+    *p++ = 0x80; *p++ = 0x38; *p++ = 0x00;
+
+    /* mov rbx, rdx ; mov rdi, rcx */
+    *p++ = 0x48; *p++ = 0x8B; *p++ = 0xDA;
+    *p++ = 0x48; *p++ = 0x8B; *p++ = 0xF9;
+
+    /* jne branch_taken */
+    *p++ = 0x75; *p++ = 0x0C;
+
+    /* mov rax, <original+0x1d> ; jmp rax */
+    *p++ = 0x48; *p++ = 0xB8;
+    addr = (uint64_t)(uintptr_t)(target + 0x1D);
+    memcpy(p, &addr, 8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+
+    /* branch_taken: mov rax, <original+0x120> ; jmp rax */
+    *p++ = 0x48; *p++ = 0xB8;
+    addr = (uint64_t)(uintptr_t)(target + 0x120);
+    memcpy(p, &addr, 8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+
+    original_ingame_ontransitionin = (fn_ingame_ontransitionin_t)trampoline;
+
+    {
+        uint8_t patch[29];
+        write_abs_jump(patch, hook_ingame_ontransitionin);
+        memset(patch + 14, 0x90, sizeof(patch) - 14);
+        if (!safe_write(target, patch, sizeof(patch))) return 0;
+    }
+
+    logmsg("Installed InGame.OnTransitionIn hook at %p (trampoline=%p)", target, trampoline);
+    return 1;
+}
+
+static int install_viewmanager_prepgamewindows_hook(void) {
+    uint8_t *target = ga_base + RVA_VIEWMANAGER_PREPGAMEWINDOWS;
+    uint8_t *trampoline = (uint8_t *)alloc_executable(64);
+    if (!trampoline) return 0;
+    if (target[0] != 0x48 || target[1] != 0x89 || target[2] != 0x5C || target[3] != 0x24 ||
+        target[4] != 0x08 || target[5] != 0x57 || target[6] != 0x48 || target[7] != 0x83) {
+        logmsg("ERROR: Unexpected bytes at ViewManager.PrepGameWindows: %02X %02X %02X %02X %02X %02X %02X %02X",
+               target[0], target[1], target[2], target[3], target[4], target[5], target[6], target[7]);
+        return 0;
+    }
+    memcpy(trampoline, target, 14);
+    write_abs_jump(trampoline + 14, target + 14);
+    original_viewmanager_prepgamewindows = (fn_viewmanager_prepgamewindows_t)trampoline;
+    { uint8_t patch[14]; write_abs_jump(patch, hook_viewmanager_prepgamewindows); if (!safe_write(target, patch, sizeof(patch))) return 0; }
+    logmsg("Installed ViewManager.PrepGameWindows hook at %p (trampoline=%p)", target, trampoline);
+    return 1;
+}
+
+static int install_viewmanager_initdock_hook(void) {
+    uint8_t *target = ga_base + RVA_VIEWMANAGER_INITIALIZEDOCKANDFLOATINGWINDOWS;
+    uint8_t *trampoline = (uint8_t *)alloc_executable(80);
+    if (!trampoline) return 0;
+    if (target[0] != 0x48 || target[1] != 0x89 || target[2] != 0x5C || target[3] != 0x24 ||
+        target[4] != 0x08 || target[5] != 0x48 || target[6] != 0x89 || target[7] != 0x6C) {
+        logmsg("ERROR: Unexpected bytes at ViewManager.InitializeDockAndFloatingWindows: %02X %02X %02X %02X %02X %02X %02X %02X",
+               target[0], target[1], target[2], target[3], target[4], target[5], target[6], target[7]);
+        return 0;
+    }
+    memcpy(trampoline, target, 20);
+    write_abs_jump(trampoline + 20, target + 20);
+    original_viewmanager_initdock = (fn_viewmanager_initdock_t)trampoline;
+    { uint8_t patch[14]; write_abs_jump(patch, hook_viewmanager_initdock); if (!safe_write(target, patch, sizeof(patch))) return 0; }
+    logmsg("Installed ViewManager.InitializeDockAndFloatingWindows hook at %p (trampoline=%p)", target, trampoline);
+    return 1;
+}
+
+static int install_basicheader_read_hook(void) {
+    uint8_t *target = ga_base + RVA_BASICHEADER_READ;
+    uint8_t *trampoline;
+    uint8_t *p;
+    uint64_t addr;
+
+    if (target[0] != 0x40 || target[1] != 0x55 ||
+        target[2] != 0x56 || target[3] != 0x57 ||
+        target[4] != 0x48 || target[5] != 0x83 || target[6] != 0xEC || target[7] != 0x40) {
+        logmsg("ERROR: Unexpected bytes at BasicHeader.Read: %02X %02X %02X %02X %02X %02X %02X %02X",
+               target[0], target[1], target[2], target[3], target[4], target[5], target[6], target[7]);
+        return 0;
+    }
+
+    trampoline = (uint8_t *)alloc_executable(128);
+    if (!trampoline) {
+        logmsg("ERROR: Failed to allocate trampoline for BasicHeader.Read");
+        return 0;
+    }
+
+    p = trampoline;
+
+    /* push rbp; push rsi; push rdi; sub rsp, 0x40 */
+    *p++ = 0x40; *p++ = 0x55;
+    *p++ = 0x56;
+    *p++ = 0x57;
+    *p++ = 0x48; *p++ = 0x83; *p++ = 0xEC; *p++ = 0x40;
+
+    /* mov rax, <flag_addr> ; cmp byte ptr [rax], 0 */
+    *p++ = 0x48; *p++ = 0xB8;
+    addr = (uint64_t)(uintptr_t)(ga_base + 0x0445B9F0);
+    memcpy(p, &addr, 8); p += 8;
+    *p++ = 0x80; *p++ = 0x38; *p++ = 0x00;
+
+    /* mov rax, <original+0x0f> ; jmp rax */
+    *p++ = 0x48; *p++ = 0xB8;
+    addr = (uint64_t)(uintptr_t)(target + 0x0F);
+    memcpy(p, &addr, 8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+
+    original_basicheader_read = (fn_basicheader_read_t)trampoline;
+
+    {
+        uint8_t patch[15];
+        write_abs_jump(patch, hook_basicheader_read);
+        patch[14] = 0x90;
+        if (!safe_write(target, patch, sizeof(patch))) {
+            logmsg("ERROR: Failed to patch BasicHeader.Read");
+            return 0;
+        }
+    }
+
+    logmsg("Installed BasicHeader.Read hook at %p (trampoline=%p)", target, trampoline);
+    return 1;
+}
+
+static int install_scene_load_wrapper_hook(void) {
+    uint8_t *target = ga_base + RVA_SCENE_LOAD_WRAPPER;
+    uint8_t *trampoline;
+    uint8_t *p;
+    uint64_t addr;
+
+    if (target[0] != 0x48 || target[1] != 0x89 || target[2] != 0x5C || target[3] != 0x24 ||
+        target[4] != 0x10 || target[5] != 0x57 || target[6] != 0x48 || target[7] != 0x83) {
+        logmsg("ERROR: Unexpected bytes at scene load wrapper: %02X %02X %02X %02X %02X %02X %02X %02X",
+               target[0], target[1], target[2], target[3], target[4], target[5], target[6], target[7]);
+        return 0;
+    }
+
+    trampoline = (uint8_t *)alloc_executable(128);
+    if (!trampoline) {
+        logmsg("ERROR: Failed to allocate trampoline for scene load wrapper");
+        return 0;
+    }
+
+    p = trampoline;
+
+    /* mov [rsp+0x10],rbx ; push rdi ; sub rsp,0x30 */
+    *p++ = 0x48; *p++ = 0x89; *p++ = 0x5C; *p++ = 0x24; *p++ = 0x10;
+    *p++ = 0x57;
+    *p++ = 0x48; *p++ = 0x83; *p++ = 0xEC; *p++ = 0x30;
+
+    /* mov rax, <flag_addr> ; cmp byte ptr [rax], 0 */
+    *p++ = 0x48; *p++ = 0xB8;
+    addr = (uint64_t)(uintptr_t)(ga_base + 0x044624AD);
+    memcpy(p, &addr, 8); p += 8;
+    *p++ = 0x80; *p++ = 0x38; *p++ = 0x00;
+
+    /* mov rax, <original+0x11> ; jmp rax */
+    *p++ = 0x48; *p++ = 0xB8;
+    addr = (uint64_t)(uintptr_t)(target + 0x11);
+    memcpy(p, &addr, 8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+
+    original_scene_load_wrapper = (fn_scene_load_wrapper_t)trampoline;
+
+    {
+        uint8_t patch[17];
+        write_abs_jump(patch, hook_scene_load_wrapper);
+        patch[14] = 0x90;
+        patch[15] = 0x90;
+        patch[16] = 0x90;
+        if (!safe_write(target, patch, sizeof(patch))) {
+            logmsg("ERROR: Failed to patch scene load wrapper");
+            return 0;
+        }
+    }
+
+    logmsg("Installed scene load wrapper hook at %p (trampoline=%p)", target, trampoline);
+    return 1;
+}
+
+static int install_clientloadscene_movenext_hook(void) {
+    uint8_t *target = ga_base + RVA_CLIENTLOADSCENE_MOVENEXT;
+    uint8_t *trampoline;
+    uint8_t *p;
+    uint64_t addr;
+
+    if (target[0] != 0x40 || target[1] != 0x56 || target[2] != 0x57 ||
+        target[3] != 0x41 || target[4] != 0x57 || target[5] != 0x48 ||
+        target[6] != 0x83 || target[7] != 0xEC || target[8] != 0x30) {
+        logmsg("ERROR: Unexpected bytes at ClientLoadScene.MoveNext: %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+               target[0], target[1], target[2], target[3], target[4], target[5], target[6], target[7], target[8]);
+        return 0;
+    }
+
+    trampoline = (uint8_t *)alloc_executable(128);
+    if (!trampoline) {
+        logmsg("ERROR: Failed to allocate trampoline for ClientLoadScene.MoveNext");
+        return 0;
+    }
+
+    p = trampoline;
+
+    /* push rsi ; push rdi ; push r15 ; sub rsp,0x30 */
+    *p++ = 0x40; *p++ = 0x56;
+    *p++ = 0x57;
+    *p++ = 0x41; *p++ = 0x57;
+    *p++ = 0x48; *p++ = 0x83; *p++ = 0xEC; *p++ = 0x30;
+
+    /* mov rax, <flag_addr> ; cmp byte ptr [rax], 0 */
+    *p++ = 0x48; *p++ = 0xB8;
+    addr = (uint64_t)(uintptr_t)(ga_base + 0x04471FD4);
+    memcpy(p, &addr, 8); p += 8;
+    *p++ = 0x80; *p++ = 0x38; *p++ = 0x00;
+
+    /* mov rdi, rcx */
+    *p++ = 0x48; *p++ = 0x8B; *p++ = 0xF9;
+
+    /* mov rax, <original+19> ; jmp rax */
+    *p++ = 0x48; *p++ = 0xB8;
+    addr = (uint64_t)(uintptr_t)(target + 19);
+    memcpy(p, &addr, 8); p += 8;
+    *p++ = 0xFF; *p++ = 0xE0;
+
+    original_clientloadscene_movenext = (fn_clientloadscene_movenext_t)trampoline;
+
+    {
+        uint8_t patch[19];
+        write_abs_jump(patch, hook_clientloadscene_movenext);
+        patch[14] = 0x90;
+        patch[15] = 0x90;
+        patch[16] = 0x90;
+        patch[17] = 0x90;
+        patch[18] = 0x90;
+        if (!safe_write(target, patch, sizeof(patch))) {
+            logmsg("ERROR: Failed to patch ClientLoadScene.MoveNext");
+            return 0;
+        }
+    }
+
+    logmsg("Installed ClientLoadScene.MoveNext hook at %p (trampoline=%p)", target, trampoline);
+    return 1;
+}
+
 /* ── Lazy init from game thread (no background thread) ───────────────── */
 /*
  * Patching is triggered from proxy function calls, which run on the
@@ -883,6 +2015,24 @@ static int install_addon_skip_patch(void) {
  */
 
 static volatile int patch_state = 0;
+
+/* Patch: NOP AnimatedDestructible.PlayablePreparerTask.Tick so it never processes
+ * its request queue.  Without a real asset server, DoLoad/DoSpawn produce dangling
+ * delegate invocation list entries that crash RequestCompleteHandler.Invoke. */
+static int install_animdestructible_tick_nop(void) {
+    uint8_t *target = ga_base + RVA_ANIMDESTRUCTIBLE_TICK;
+    if (target[0] == 0xC3) {
+        logmsg("AnimDestructible.PlayablePreparerTask.Tick already patched");
+        return 1;
+    }
+    uint8_t ret_patch[1] = { 0xC3 };
+    if (!safe_write(target, ret_patch, sizeof(ret_patch))) {
+        logmsg("ERROR: Failed to NOP AnimDestructible.PlayablePreparerTask.Tick at %p", target);
+        return 0;
+    }
+    logmsg("Patched AnimDestructible.PlayablePreparerTask.Tick -> RET at %p", target);
+    return 1;
+}
 
 static void try_apply_patches(void) {
     if (patch_state == 1) return;  /* already done */
@@ -917,10 +2067,31 @@ static void try_apply_patches(void) {
     int ok1b = install_createchar_trampoline();
     int ok2 = install_reftype_patch();
     int ok3 = install_addon_skip_patch();
+    int ok4 = install_loadingworld_onphysicsrequest_hook();
+    int ok4b = install_loadingworld_onphysauth_hook();
+    int ok4c = install_loadingworld_onworldready_hook();
+    int ok4d = install_ingame_onenteredzone_hook();
+    int ok4e = install_ingame_onphysicsdisconnect_hook();
+    int ok4f = install_ingame_onzonetransferbegin_hook();
+    int ok4g = install_ingame_onplayerleft_hook();
+    int ok4j = install_ingame_ontransitionin_hook();
+    int ok4h = 1; /* disabled: naive trampoline copy was unstable here */
+    int ok4i = 1; /* disabled: naive trampoline copy was unstable here */
+    int ok_animd = install_animdestructible_tick_nop();
+    int ok5 = install_basicheader_read_hook();
+    int ok6 = install_scene_load_wrapper_hook();
+    int ok7 = 1; /* disabled while reducing scene-load hook footprint */
+    log_runtime_string_ids();
+    log_request_payload_bytes();
 
-    logmsg("=== Patches: charlist=%s  createchar=%s  reftype=%s  addon_skip=%s ===",
+    logmsg("=== Patches: charlist=%s  createchar=%s  reftype=%s  addon_skip=%s  loadingworld_onphysics=%s  loadingworld_auth=%s  loadingworld_worldready=%s  ingame_enteredzone=%s  ingame_physdisc=%s  ingame_zonetransfer=%s  ingame_playerleft=%s  ingame_transitionin=%s  view_prep=%s  view_initdock=%s  animd_tick=%s  basicheader_read=%s  scene_load=%s  clientloadscene=%s ===",
            ok1 ? "OK" : "FAIL", ok1b ? "OK" : "FAIL",
-           ok2 ? "OK" : "FAIL", ok3 ? "OK" : "FAIL");
+           ok2 ? "OK" : "FAIL", ok3 ? "OK" : "FAIL", ok4 ? "OK" : "FAIL",
+           ok4b ? "OK" : "FAIL", ok4c ? "OK" : "FAIL",
+           ok4d ? "OK" : "FAIL", ok4e ? "OK" : "FAIL", ok4f ? "OK" : "FAIL", ok4g ? "OK" : "FAIL", ok4j ? "OK" : "FAIL",
+           ok4h ? "DISABLED" : "FAIL", ok4i ? "DISABLED" : "FAIL",
+           ok_animd ? "OK" : "FAIL",
+           ok5 ? "OK" : "FAIL", ok6 ? "OK" : "FAIL", ok7 ? "DISABLED" : "FAIL");
 
     patch_state = 1;  /* done — stop retrying */
 }

@@ -98,6 +98,7 @@ def make_login_response():
 
 
 def make_enter_lobby_response():
+    active_character_guid = saved_characters[0]["object_guid"] if saved_characters else ""
     return {
         "success": True,
         "message": "",
@@ -105,7 +106,7 @@ def make_enter_lobby_response():
         "zoneRemoved": False,
         "canRecall": False,
         "inLobby": True,
-        "characterGuid": "",
+        "characterGuid": active_character_guid,
         "currentScenarioUuid": "",
         "zoneInfo": {
             "endpoint": "127.0.0.1:8900",
@@ -143,6 +144,7 @@ def make_bank_response():
                     "Locking": False,
                     "DefaultExportCount": 0,
                     "DefaultImportCount": 0,
+                    "InventoryRestrictions": 0,
                     "AllowEarlyExport": False,
                     "ImportAdditionalItemAdjectives": [],
                     "ImportRestrictedAdjectives": [],
@@ -401,6 +403,28 @@ class AuthHandler(BaseHTTPRequestHandler):
         elif p.startswith('/ek/campaigns/running'):
             self.send_json({"scenarios": []})
 
+        elif p.startswith('/faction/get_faction_list/'):
+            # /faction/get_faction_list/{scenario_uuid}/{max_pop}/{offset}
+            # Returns List<FactionData> (CrowfallCommonUtilities.FactionData)
+            def make_faction(fid, name, adjective):
+                return {
+                    "FactionId": fid,
+                    "StaticFactionName": name,
+                    "GuildId": "",
+                    "PlayerCanJoin": True,
+                    "ScoreboardVisible": True,
+                    "DefaultRating": 1000,
+                    "Allegiance": "",
+                    "ParentFactionId": 0,
+                    "RouteAdjective": adjective,
+                    "Ratings": [],
+                }
+            self.send_json([
+                make_faction(1, "Order",   "order"),
+                make_faction(2, "Chaos",   "chaos"),
+                make_faction(3, "Balance", "balance"),
+            ])
+
         elif p.startswith('/faction/get_scenario_account_faction/'):
             self.send_json({"faction_id": 0})
 
@@ -481,12 +505,16 @@ class AuthHandler(BaseHTTPRequestHandler):
             self.send_json(resp)
 
         elif p == '/zone_transfer/enter_scenario':
+            active_character_guid = saved_characters[0]["object_guid"] if saved_characters else ""
             self.send_json({
                 "success": True,
                 "message": "",
                 "queueToken": "mock_queue_token",
                 "zoneRemoved": False,
                 "canRecall": False,
+                "inLobby": False,
+                "characterGuid": active_character_guid,
+                "currentScenarioUuid": "00000000-0000-0000-0000-000000000100",
                 "zoneInfo": {
                     "endpoint": "127.0.0.1:8900",
                     "ipv6_endpoint": "",
